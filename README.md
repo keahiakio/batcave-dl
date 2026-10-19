@@ -9,6 +9,7 @@ A lightweight Python CLI tool that scrapes comic series from [batcave.biz](https
 - **Anti-Bot & Auth Handling**:
   - Automatically solves BatCave's SHA-256 Proof-of-Work (`/_v`) challenge.
   - Automatically syncs your `batcave.biz` login session cookies from **qutebrowser** or **Firefox** (required for chapters gated behind *"Sign in to keep reading"*).
+  - Parses `window.__DATA__` payloads via streaming JSON decoding (`JSONDecoder.raw_decode`) so trailing inline `<script>` statements do not break extraction, and honors `window.__DATA__.pages` truncation to ignore extra trailing/canary image entries.
 - **Atomic `.cbz` Packaging**: Downloads pages concurrently into a temporary `.cbz.part` archive before moving into place, ensuring interrupted runs never leave corrupted `.cbz` files.
 - **Supernote & E-Reader Compatible (WebP -> JPEG by Default)**: Automatically converts `.webp` and `.avif` comic pages to standard `.jpg` (`JPEG`) in-memory via `libwebp` + `libturbojpeg` (with CLI fallbacks to GraphicsMagick, ImageMagick, or `ffmpeg`), and automatically upgrades any existing `.cbz` archives that still contain `.webp` pages.
 - **Clean Naming**: Normalizes ongoing year ranges (e.g., `(2024-)` -> `(2024)`) and zero-pads single-digit issue numbers (`#1` -> `#01`) so comic readers sort issues properly.

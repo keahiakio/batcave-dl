@@ -359,14 +359,20 @@ def fetch_html(url: str, cookie_jar: Path) -> str:
 
 def extract_window_data(html: str) -> dict:
     """Extract window.__DATA__ JSON object from a comic or reader HTML page."""
-    m = re.search(r"window\.__DATA__\s*=\s*(\{.*?\});?\s*</script>", html, re.S)
+    m = re.search(r"window\.__DATA__\s*=\s*\{", html)
     if not m:
         if "Sign in to keep reading" in html:
             raise RuntimeError(
                 "BatCave.biz requires sign-in. Please log in via qutebrowser or Firefox first."
             )
         raise RuntimeError("Could not find window.__DATA__ on page.")
-    return json.loads(m.group(1))
+    brace_start = m.end() - 1
+    data, _ = json.JSONDecoder().raw_decode(html, brace_start)
+    images = data.get("images")
+    pages = data.get("pages")
+    if isinstance(images, list) and isinstance(pages, int) and 0 < pages < len(images):
+        data["images"] = images[:pages]
+    return data
 
 
 def fetch_page_bytes(url: str, cookie_jar: Path, retries: int = 4) -> bytes:
