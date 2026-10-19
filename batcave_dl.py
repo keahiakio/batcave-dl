@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import ctypes
+import ctypes.util
 import glob
 import hashlib
 import json
@@ -35,6 +37,54 @@ COOKIE_JAR = CACHE_DIR / "cookies.txt"
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0"
 )
+
+
+def _init_native_webp_jpeg() -> tuple[ctypes.CDLL | None, ctypes.CDLL | None]:
+    """Load libwebp and libturbojpeg via ctypes for fast in-process WebP -> JPEG conversion."""
+    try:
+        webp_name = ctypes.util.find_library("webp")
+        tj_name = ctypes.util.find_library("turbojpeg")
+        if not webp_name or not tj_name:
+            return None, None
+        libwebp = ctypes.CDLL(webp_name)
+        libtj = ctypes.CDLL(tj_name)
+
+        libwebp.WebPDecodeRGB.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        libwebp.WebPDecodeRGB.restype = ctypes.c_void_p
+        libwebp.WebPFree.argtypes = [ctypes.c_void_p]
+        libwebp.WebPFree.restype = None
+
+        libtj.tjInitCompress.argtypes = []
+        libtj.tjInitCompress.restype = ctypes.c_void_p
+        libtj.tjDestroy.argtypes = [ctypes.c_void_p]
+        libtj.tjDestroy.restype = ctypes.c_int
+        libtj.tjFree.argtypes = [ctypes.c_void_p]
+        libtj.tjFree.restype = None
+        libtj.tjCompress2.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        libtj.tjCompress2.restype = ctypes.c_int
+        return libwebp, libtj
+    except Exception:
+        return None, None
+
+
+_LIBWEBP, _LIBTJ = _init_native_webp_jpeg()
 
 
 def normalize_series_title(title: str) -> str:
@@ -75,17 +125,84 @@ def detect_image_ext(data: bytes, url: str = "") -> str:
     return m.group(1).lower() if m else "jpg"
 
 
-def convert_to_jpg(data: bytes) -> bytes:
-    """Convert image bytes (e.g. WebP) to JPEG using ImageMagick if requested."""
-    res = subprocess.run(
-        ["magick", "-", "-quality", "92", "jpeg:-"],
-        input=data,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    if res.returncode == 0 and res.stdout.startswith(b"\xff\xd8\xff"):
-        return res.stdout
+def convert_to_jpg(data: bytes, quality: int = 90) -> bytes:
+    """
+    Convert WebP/AVIF image bytes to standard JPEG (far smaller and faster than PNG
+    for full-color comic pages, and supported natively by e-ink readers like Supernote).
+    """
+    # 1. Fast in-process path via libwebp + libturbojpeg
+    if (
+        _LIBWEBP is not None
+        and _LIBTJ is not None
+        and len(data) >= 12
+        and data[:4] == b"RIFF"
+        and data[8:12] == b"WEBP"
+    ):
+        w = ctypes.c_int()
+        h = ctypes.c_int()
+        rgb_ptr = _LIBWEBP.WebPDecodeRGB(data, len(data), ctypes.byref(w), ctypes.byref(h))
+        if rgb_ptr:
+            try:
+                handle = _LIBTJ.tjInitCompress()
+                if handle:
+                    try:
+                        jpeg_buf = ctypes.c_void_p()
+                        jpeg_size = ctypes.c_ulong()
+                        # TJPF_RGB=0, TJSAMP_420=2
+                        rc = _LIBTJ.tjCompress2(
+                            handle,
+                            rgb_ptr,
+                            w.value,
+                            0,
+                            h.value,
+                            0,
+                            ctypes.byref(jpeg_buf),
+                            ctypes.byref(jpeg_size),
+                            2,
+                            quality,
+                            0,
+                        )
+                        if rc == 0 and jpeg_buf and jpeg_size.value > 0:
+                            try:
+                                out = ctypes.string_at(jpeg_buf.value, jpeg_size.value)
+                                if out.startswith(b"\xff\xd8\xff"):
+                                    return out
+                            finally:
+                                _LIBTJ.tjFree(jpeg_buf)
+                    finally:
+                        _LIBTJ.tjDestroy(handle)
+            finally:
+                _LIBWEBP.WebPFree(rgb_ptr)
+
+    # 2. Fallback to CLI converters (GraphicsMagick -> ImageMagick -> ffmpeg)
+    for cmd in (
+        ["gm", "convert", "-", "-quality", str(quality), "jpeg:-"],
+        ["magick", "-", "-quality", str(quality), "jpeg:-"],
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-q:v",
+            "3",
+            "-f",
+            "mjpeg",
+            "pipe:1",
+        ],
+    ):
+        if shutil.which(cmd[0]) is None:
+            continue
+        res = subprocess.run(
+            cmd,
+            input=data,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout.startswith(b"\xff\xd8\xff"):
+            return res.stdout
     return data
 
 
@@ -327,13 +444,69 @@ def is_issue_downloaded(
     return None
 
 
+def cbz_has_webp_or_avif(cbz_path: Path) -> bool:
+    """Return True if an existing .cbz archive contains any .webp or .avif entries."""
+    try:
+        with zipfile.ZipFile(cbz_path, "r") as zf:
+            for name in zf.namelist():
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                if ext in ("webp", "avif"):
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def convert_cbz_webp_to_jpg(cbz_path: Path, workers: int = 8) -> int:
+    """
+    Atomically convert any .webp/.avif pages inside an existing .cbz archive to .jpg
+    so e-ink readers like Supernote can open the archive without 'corrupted file' errors.
+    Returns number of converted pages.
+    """
+    if not cbz_has_webp_or_avif(cbz_path):
+        return 0
+
+    with zipfile.ZipFile(cbz_path, "r") as zf:
+        entries = [(info.filename, zf.read(info.filename)) for info in zf.infolist()]
+
+    def _process_entry(item: tuple[str, bytes]) -> tuple[str, bytes, bool]:
+        name, blob = item
+        ext = detect_image_ext(blob, name)
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        if ext in ("webp", "avif"):
+            converted = convert_to_jpg(blob)
+            if converted.startswith(b"\xff\xd8\xff"):
+                return f"{stem}.jpg", converted, True
+        return name, blob, False
+
+    max_workers = max(1, workers, os.cpu_count() or 4)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        processed = list(pool.map(_process_entry, entries))
+
+    converted_count = sum(1 for _, _, changed in processed if changed)
+    if converted_count == 0:
+        return 0
+
+    part_file = cbz_path.with_suffix(".cbz.repack.part")
+    try:
+        with zipfile.ZipFile(part_file, "w", compression=zipfile.ZIP_STORED) as zf:
+            for new_name, new_blob, _ in processed:
+                zf.writestr(new_name, new_blob)
+        part_file.replace(cbz_path)
+    finally:
+        if part_file.exists():
+            part_file.unlink(missing_ok=True)
+
+    return converted_count
+
+
 def download_issue_cbz(
     news_id: int,
     chap: dict,
     target_cbz: Path,
     cookie_jar: Path,
     workers: int = 4,
-    recode_jpg: bool = False,
+    recode_jpg: bool = True,
 ) -> int:
     """Download all pages of an issue and package them into a .cbz archive atomically."""
     if target_cbz.exists():
@@ -349,17 +522,27 @@ def download_issue_cbz(
 
     total_pages = len(images)
     width = max(2, len(str(total_pages)))
-    page_blobs: list[bytes | None] = [None] * total_pages
+    page_items: list[tuple[str, bytes] | None] = [None] * total_pages
+
+    def _fetch_and_prepare(idx: int, img_url: str) -> tuple[str, bytes]:
+        blob = fetch_page_bytes(img_url, cookie_jar)
+        ext = detect_image_ext(blob, img_url)
+        if recode_jpg and ext in ("webp", "avif"):
+            converted = convert_to_jpg(blob)
+            if converted.startswith(b"\xff\xd8\xff"):
+                blob = converted
+                ext = "jpg"
+        return f"{idx + 1:0{width}d}.{ext}", blob
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         future_to_idx = {
-            pool.submit(fetch_page_bytes, img_url, cookie_jar): idx
+            pool.submit(_fetch_and_prepare, idx, img_url): idx
             for idx, img_url in enumerate(images)
         }
         done_count = 0
         for fut in as_completed(future_to_idx):
             idx = future_to_idx[fut]
-            page_blobs[idx] = fut.result()
+            page_items[idx] = fut.result()
             done_count += 1
             print(
                 f"\r    Downloading pages: {done_count}/{total_pages}",
@@ -372,15 +555,9 @@ def download_issue_cbz(
     part_file = target_cbz.with_suffix(".cbz.part")
     try:
         with zipfile.ZipFile(part_file, "w", compression=zipfile.ZIP_STORED) as zf:
-            for idx, blob in enumerate(page_blobs):
-                assert blob is not None
-                ext = detect_image_ext(blob, images[idx])
-                if recode_jpg and ext in ("webp", "avif"):
-                    converted = convert_to_jpg(blob)
-                    if converted[:3] == b"\xff\xd8\xff":
-                        blob = converted
-                        ext = "jpg"
-                page_name = f"{idx + 1:0{width}d}.{ext}"
+            for item in page_items:
+                assert item is not None
+                page_name, blob = item
                 zf.writestr(page_name, blob)
 
         # Double-check we never overwrite an existing file
@@ -425,7 +602,13 @@ def main() -> int:
     parser.add_argument(
         "--convert-jpg",
         action="store_true",
-        help="Convert WebP/AVIF pages to JPEG inside the CBZ archive",
+        default=True,
+        help="Convert WebP/AVIF pages to JPEG inside CBZ archives (enabled by default for Supernote compatibility)",
+    )
+    parser.add_argument(
+        "--keep-webp",
+        action="store_true",
+        help="Keep raw WebP/AVIF pages instead of converting to JPEG",
     )
     parser.add_argument(
         "-n",
@@ -434,6 +617,7 @@ def main() -> int:
         help="Check for new issues and create folders without downloading pages",
     )
     args = parser.parse_args()
+    recode_jpg = not args.keep_webp
 
     urls = parse_reading_list(args.list)
     if not urls:
@@ -446,6 +630,7 @@ def main() -> int:
     print(f"Loaded {len(urls)} comic(s) from {args.list.name}\n")
 
     new_downloaded = 0
+    repacked_existing = 0
     skipped_existing = 0
     errors = 0
 
@@ -480,6 +665,7 @@ def main() -> int:
 
         # Determine which chapters are already on disk vs new
         missing_chapters: list[tuple[dict, Path]] = []
+        existing_cbzs: list[Path] = []
         for chap in chapters:
             chap_id = int(chap["id"])
             raw_chap_title = chap.get("title") or f"{folder_name} #{chap.get('posi', chap_id)}"
@@ -487,6 +673,7 @@ def main() -> int:
             if existing is not None:
                 skipped_existing += 1
                 downloaded_ids.add(chap_id)
+                existing_cbzs.append(existing)
             else:
                 target_cbz = comic_dir / f"{normalize_issue_title(raw_chap_title)}.cbz"
                 missing_chapters.append((chap, target_cbz))
@@ -495,6 +682,21 @@ def main() -> int:
             f"==> {folder_name} ({len(chapters)} total, "
             f"{len(chapters) - len(missing_chapters)} on disk, {len(missing_chapters)} new)"
         )
+
+        if recode_jpg:
+            for existing_cbz in existing_cbzs:
+                if cbz_has_webp_or_avif(existing_cbz):
+                    if args.dry_run:
+                        print(f"  [webp->jpg] {existing_cbz.name}")
+                    else:
+                        try:
+                            conv_pages = convert_cbz_webp_to_jpg(existing_cbz, workers=args.jobs)
+                            if conv_pages > 0:
+                                repacked_existing += 1
+                                print(f"  [webp->jpg] {existing_cbz.name} ({conv_pages} pages converted)")
+                        except Exception as e:
+                            print(f"  [!] Failed to convert {existing_cbz.name}: {e}")
+                            errors += 1
 
         if args.dry_run:
             for _, target_cbz in missing_chapters:
@@ -511,7 +713,7 @@ def main() -> int:
                     target_cbz=target_cbz,
                     cookie_jar=COOKIE_JAR,
                     workers=args.jobs,
-                    recode_jpg=args.convert_jpg,
+                    recode_jpg=recode_jpg,
                 )
                 if pages > 0:
                     new_downloaded += 1
@@ -535,6 +737,7 @@ def main() -> int:
 
     print(
         f"\nDone! Downloaded: {new_downloaded} new issue(s), "
+        f"Converted existing WebP->JPG: {repacked_existing}, "
         f"Skipped (already downloaded): {skipped_existing}, Errors: {errors}"
     )
     return 1 if errors else 0

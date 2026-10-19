@@ -11,3 +11,5 @@
 - https://batcave.biz/38792-midnight-spider-man-2026.html
 - https://batcave.biz/38822-midnight-x-men-2026.html
 - https://batcave.biz/38796-midnight-fantastic-four-2026.html
+- https://batcave.biz/2752-house-of-x/powers-of-x.html
+- 
