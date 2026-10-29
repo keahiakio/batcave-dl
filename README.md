@@ -138,3 +138,26 @@ Add any `batcave.biz` series URLs to `current_batcave_reading_list.md`. Markdown
 #### Marvel Comics
 - https://batcave.biz/38792-midnight-spider-man-2026.html
 ```
+
+---
+
+## License
+
+Dual-licensed under either:
+
+- **MIT License** ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+- **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+
+at your option.
+
+### Third-Party Compliance
+
+`batcave-dl` relies strictly on the Python standard library, but can utilize external libraries and command-line utilities for image conversion and network transfers:
+
+- **libwebp**: BSD-3-Clause (<https://chromium.googlesource.com/webm/libwebp>)
+- **libjpeg-turbo** (`libturbojpeg`): BSD-3-Clause / IJG / zlib (<https://github.com/libjpeg-turbo/libjpeg-turbo>)
+- **curl**: curl License / MIT-style (<https://curl.se/docs/copyright.html>)
+- **ImageMagick**: ImageMagick License / Apache-2.0 compatible (<https://imagemagick.org/script/license.php>)
+- **GraphicsMagick**: GraphicsMagick License / MIT-style (<http://www.graphicsmagick.org/Copyright.html>)
+- **ffmpeg**: LGPL-2.1-or-later / GPL-2.0-or-later (<https://ffmpeg.org/legal.html>) (external CLI fallback executed via `subprocess`)
+
