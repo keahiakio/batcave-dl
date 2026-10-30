@@ -161,3 +161,9 @@ at your option.
 - **GraphicsMagick**: GraphicsMagick License / MIT-style (<http://www.graphicsmagick.org/Copyright.html>)
 - **ffmpeg**: LGPL-2.1-or-later / GPL-2.0-or-later (<https://ffmpeg.org/legal.html>) (external CLI fallback executed via `subprocess`)
 
+---
+
+## AI Disclosure
+
+This is an AI-assisted project. Code and documentation were developed with the assistance of AI tools.
+
