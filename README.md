@@ -141,6 +141,14 @@ Add any `batcave.biz` series URLs to `current_batcave_reading_list.md`. Markdown
 
 ---
 
+## Contributing & Community
+
+Contributions, issue reports, and suggestions are welcome! Please check out [CONTRIBUTING.md](CONTRIBUTING.md) for development principles, testing, and pull request procedures. All participants are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
+
+For responsible vulnerability reporting, please refer to our [Security Policy](SECURITY.md).
+
+---
+
 ## License
 
 Dual-licensed under either:
